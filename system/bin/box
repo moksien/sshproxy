@@ -1,0 +1,135 @@
+#!/system/bin/sh
+#
+export HOME=/data/data/jackpal.androidterm/app_HOME
+export UTILS="/system/bin/clays"
+export PATH=$UTILS/bin:$PATH
+
+if [ ! -f /etc/passwd ]; then
+   busybox mount -o remount rw, /system
+   echo "root:x:0:0:root:/data/data/jackpal.androidterm/app_HOME:/system/bin/sh" > /etc/passwd
+   echo "nameserver $(getprop net.dns1)" > /etc/resolv.conf
+   echo "nameserver $(getprop net.dns2)" >> /etc/resolv.conf
+   busybox mount -o remount ro, /system
+fi
+
+if [ ! -d /sdcard/clays ]; then
+   busybox mkdir /sdcard/clays > /dev/null 2>&1
+   xclay > /dev/null 2>&1
+   busybox killall xclay > /dev/null 2>&1
+   echo "Restart required"
+   exit 0
+fi
+
+config_parser () {
+     iniFile="$1"
+     tmpFile=~/config
+     binSED="busybox sed"
+     busybox cp $iniFile $tmpFile;
+     $binSED -i -e 's/[ \t]*=[ \t]*/=/g' $tmpFile;
+     $binSED -i -e 's/\[\([A-Za-z0-9_]*\)\]/config.section.\1() \{/g' $tmpFile;
+     $binSED -i -e 's/config\.section\./\}\'$'\nconfig\.section\./g' $tmpFile;
+     $binSED -i -e '1d' $tmpFile;
+     echo -e "\n}" >> $tmpFile;
+     source $tmpFile;
+     busybox rm -f $tmpFile;
+}
+
+config_parser /sdcard/clays/clays.ini
+config.section.TUN2SOCKS
+config.section.ROUTE
+config.section.CLAYS
+
+if [ $profile = 1 ]; then
+    config.section.SSH1
+fi
+if [ $profile = 2 ]; then
+    config.section.SSH2
+fi
+if [ $profile = 3 ]; then
+    config.section.SSH3
+fi
+if [ $profile = 4 ]; then
+    config.section.SSH4
+fi
+
+dns() {
+     iptables -t nat -A OUTPUT -p udp --dport 53 -j DNAT --to 8.8.8.8:53 > /dev/null 2>&1
+}
+
+start_tun2socks() {
+     if [ $udp = 1 ]; then
+         tun2socks --tundev clays --netif-ipaddr 10.0.0.2 --netif-netmask 255.255.255.0 --socks-server-addr 127.0.0.1:"${port}" --udpgw-remote-server-addr 127.0.0.1:7300 --loglevel 0 > /dev/null 2>&1 &
+         dns
+     else
+         tun2socks --tundev clays --netif-ipaddr 10.0.0.2 --netif-netmask 255.255.255.0 --socks-server-addr 127.0.0.1:"${port}" --loglevel 0 > /dev/null 2>&1 &
+     fi
+}
+
+start_inject() {
+     xclay > /dev/null 2>&1 &
+     busybox sleep 1
+}
+
+start_route() {
+     gateway=$(busybox ip route | busybox awk '/default/ { print $3 }')
+     tunctl --mktun clays > /dev/null 2>&1
+     busybox route add "${host}" gw "${gateway}" > /dev/null 2>&1
+     busybox route add "${dns}" gw "${gateway}" > /dev/null 2>&1
+     busybox route add default gw "${gateway}" metric 2 > /dev/null 2>&1
+     busybox route del default gw "${gateway}" > /dev/null 2>&1
+     busybox ifconfig clays 10.0.0.1 netmask 255.255.255.0 > /dev/null 2>&1
+     busybox route add default gw 10.0.0.2 clays > /dev/null 2>&1
+     busybox sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
+     iptables -t filter -F FORWARD > /dev/null 2>&1
+     echo "Y" > ~/route
+     echo -n "status: online"
+}
+
+stop_route() {
+     echo  "status: offline"
+     busybox route del default gw 10.0.0.2 clays > /dev/null 2>&1
+     gateway=$(busybox ip route | busybox awk '/default/ { print $3 }')
+     busybox route del "${host}" > /dev/null 2>&1
+     busybox route del "${dns}" > /dev/null 2>&1
+     busybox route del default gw "${gateway}" metric 2 > /dev/null 2>&1
+     busybox route add default gw "${gateway}" > /dev/null 2>&1
+     tunctl --rmtun clays > /dev/name 2>&1
+     iptables -t nat -F OUTPUT > /dev/null 2>&1
+}
+
+stop_apps() {
+     busybox killall ssh xclay tun2socks > /dev/null 2>&1
+}
+
+check() {
+     if [ -f ~/route ]; then
+        stop_route
+        rm ~/route
+     fi
+}
+
+start_ssh() {
+     export SSHPASS="${ssh_pass}"
+     sshpass -e ssh -N -p "${ssh_port}" "${ssh_user}"@"${ssh_host}" -o "StrictHostKeyChecking no" -o "PermitLocalCommand yes" -o "LocalCommand box online" -o "ProxyCommand corkscrew 127.0.0.1 8080 %h %p" -o "Compression yes" -o "DynamicForward 127.0.0.1:1080" &
+}
+
+case $1 in
+    start)
+    stop_apps
+    start_tun2socks
+    start_inject
+    start_ssh
+    ;;
+    stop)
+    check
+    stop_apps
+    ;;
+    online)
+    check
+    start_route
+    ;;
+    *)
+    echo "usage {start|stop}"
+    ;;
+esac
+exit 0
